@@ -1,12 +1,15 @@
 #include <iostream>
+#include <fstream>
 #include <math.h>
 #include <random>
-
+/*
+    The activation function must be of type double.
+*/
 typedef double(*activation_function)(double);
 
 template <typename InputToken, typename OutputToken, activation_function activ_func>
 class DNN {
-private:
+protected:
     // Sizes, needed for iteration bounds
     int i_layer_sz;
     int h_layer_sz;
@@ -25,17 +28,31 @@ private:
     double* delta_output_layer;
     double** delta_hidden_layers;
     double*** delta_weights;
+    double errorSum = 0.0;
 
     // Constants
-    double A, B;
+    const double A = 0.1, B = 0.1;
+
 
 public:
-    // Virtual Functions
-    virtual void process_input_token (InputToken input_token) = 0;
+    /* 
+        Define how the input layer of the dnn is filled given an Input Token.
+    */
+    void process_input_token (InputToken input_token);
 
-    virtual OutputToken extract_output_token () = 0;
+    /* 
+        Define how to construct an Output Token using the output layer.
+    */
+    OutputToken extract_output_token ();
+
+    /* 
+        This is used before back propogation. Fill the output_delta_layer according to how close the output layer is to the correct Output Token.
+    */
+    void fill_output_delta (OutputToken correct);
 
 public:
+    DNN () = default;
+
     DNN (int i, int h, int o, int n, int s) : i_layer_sz(i), h_layer_sz(h), o_layer_sz(o), n_hidden_layers(n) {
         input_layer = (double*)malloc(i_layer_sz * sizeof(double));
         output_layer = (double*)malloc(o_layer_sz * sizeof(double));
@@ -74,9 +91,95 @@ public:
             delta_weights[n_hidden_layers][j] = (double*)malloc(o_layer_sz * sizeof(double));
         }
 
-        A = 0.1;
-        B = 0.1;
         randomize_weights(s);
+    }
+
+    DNN (std::ifstream& fin) {
+        // Input the Size of the DNN
+        int i = 0;
+        fin >> i;
+        i_layer_sz = i;
+        fin >> i;
+        o_layer_sz = i;
+        fin >> i;
+        h_layer_sz = i;
+        fin >> i;
+        n_hidden_layers = i;
+
+        // Allocate the memory for the dnn
+        input_layer = (double*)malloc(i_layer_sz * sizeof(double));
+        output_layer = (double*)malloc(o_layer_sz * sizeof(double));
+        delta_output_layer = (double*)malloc(o_layer_sz * sizeof(double));
+
+        hidden_layers = (double**)malloc(n_hidden_layers * sizeof(double*));
+        delta_hidden_layers = (double**)malloc(n_hidden_layers * sizeof(double*));
+        for (int j = 0; j < n_hidden_layers; j++) {
+            hidden_layers[j] = (double*)malloc(h_layer_sz * sizeof(double));
+            delta_hidden_layers[j] = (double*)malloc(h_layer_sz * sizeof(double));
+        }
+
+        weights = (double***)malloc((n_hidden_layers + 1) * sizeof(double**));
+        delta_weights = (double***)malloc((n_hidden_layers + 1) * sizeof(double**));
+
+        weights[0] = (double**)malloc(i_layer_sz * sizeof(double*));
+        delta_weights[0] = (double**)malloc(i_layer_sz * sizeof(double*));
+        for (int j = 0; j < i_layer_sz; j++) {
+            weights[0][j] = (double*)malloc(h_layer_sz * sizeof(double));
+            delta_weights[0][j] = (double*)malloc(h_layer_sz * sizeof(double));
+        }
+
+        for (int j = 1; j < n_hidden_layers; j++) {
+            weights[j] = (double**)malloc(h_layer_sz * sizeof(double*));
+            delta_weights[j] = (double**)malloc(h_layer_sz * sizeof(double*));
+            for (int k = 0; k < h_layer_sz; k++) {
+                weights[j][k] = (double*)malloc(h_layer_sz * sizeof(double));
+                delta_weights[j][k] = (double*)malloc(h_layer_sz * sizeof(double));
+            }
+        }
+
+        weights[n_hidden_layers] = (double**)malloc(h_layer_sz * sizeof(double*));
+        delta_weights[n_hidden_layers] = (double**)malloc(h_layer_sz * sizeof(double*));
+        for (int j = 0; j < h_layer_sz; j++) {
+            weights[n_hidden_layers][j] = (double*)malloc(o_layer_sz * sizeof(double));
+            delta_weights[n_hidden_layers][j] = (double*)malloc(o_layer_sz * sizeof(double));
+        }
+
+        // Fill the allocated memory with the correct values
+        double d = 0.0;
+        for (int i = 0; i < i_layer_sz; i++) {
+            for (int j = 0; j < h_layer_sz; j++) {
+                fin >> weights[0][i][j];
+                delta_weights[0][i][j] = 0.0;
+            }
+        }
+
+        for (int i = 1; i < n_hidden_layers; i++) {
+            for (int j = 0; j < h_layer_sz; j++) {
+                for (int k = 0; k < h_layer_sz; k++) {
+                    fin >> weights[i][j][k];
+                    delta_weights[i][j][k] = 0.0;
+                }
+            }
+        }
+
+        for (int j = 0; j < h_layer_sz; j++) {
+            for (int k = 0; k < o_layer_sz; k++) {
+                fin >> weights[n_hidden_layers][j][k];
+                delta_weights[n_hidden_layers][j][k] = 0.0;
+            }
+        }
+
+        for (int i = 0; i < n_hidden_layers; i++) {
+            for (int j = 0; j < h_layer_sz; j++) {
+                fin >> delta_hidden_layers[i][j];
+            }
+        }
+
+        for (int i = 0; i < o_layer_sz; i++) {
+            delta_output_layer[i] = 0.0;
+        }
+
+        fin.close();
     }
 
     DNN (const DNN& other) {
@@ -148,14 +251,57 @@ public:
         do_feed_forward();
     }
 
-    void train_with_current_input (int correct) {
+    void train_with_current_input (OutputToken correct) {
         do_feed_forward();
 
-        do_back_propogation(correct);
+        fill_output_delta(correct);
+
+        do_back_propogation();
 
         do_stochastic_gradient_descent();
     }
 
+    void save_current_dnn (std::string file_name) {
+        file_name = "trained_dnns/" + file_name + ".dnn";
+        std::ofstream fout(file_name);
+
+        fout << i_layer_sz << '\n';
+        fout << o_layer_sz << '\n';
+        fout << h_layer_sz << '\n';
+        fout << n_hidden_layers << '\n';
+
+        for (int i = 0; i < i_layer_sz; i++) {
+            for (int j = 0; j < h_layer_sz; j++) {
+                fout << weights[0][i][j] >> ' ';
+            }
+        }
+        fout << '\n';
+
+        for (int i = 1; i < n_hidden_layers; i++) {
+            for (int j = 0; j < h_layer_sz; j++) {
+                for (int k = 0; k < h_layer_sz; k++) {
+                    fout << weights[i][j][k] >> ' ';
+                }
+            }
+        }
+        fout << '\n';
+
+        for (int j = 0; j < h_layer_sz; j++) {
+            for (int k = 0; k < o_layer_sz; k++) {
+                fout << weights[n_hidden_layers][j][k] >> ' ';
+            }
+        }
+        fout << '\n';
+
+        for (int i = 0; i < n_hidden_layers; i++) {
+            for (int j = 0; j < h_layer_sz; j++) {
+                fout << delta_hidden_layers[i][j] >> ' ';
+            }
+        }
+        fout << '\n';
+
+        fout.close();
+    }
 private:
     void do_feed_forward () {
         double sum = 0.0;
@@ -192,20 +338,8 @@ private:
         }
     }
 
-    void do_back_propogation (int correct) {
-        double errorTemp = 0.0, errorSum = 0.0;
-        
-        for (int i = 0; i < o_layer_sz; i++) {
-            if (i == correct) {
-                errorTemp = 1 - output_layer[i];
-            }
-            else {
-                errorTemp = -output_layer[i];
-            }
-            delta_output_layer[i] = -errorTemp * activ_func(output_layer[i]) * (1 - activ_func(output_layer[i]));
-            errorSum += errorTemp * errorTemp;
-        }
-
+    void do_back_propogation () {
+        double errorTemp = 0.0;
         for (int i = n_hidden_layers; i > 0; i--) {
             if (i == n_hidden_layers) {
                 for (int j = 0; j < h_layer_sz; j++) {
@@ -237,8 +371,8 @@ private:
                     for (int k = 0; k < o_layer_sz; k++) {
                         delta_weights[i][j][k] = 
                             A * delta_weights[i][j][k] + 
-                            B * delta_output_layer[k] * hidden_layers[i - 1][j]; // index problem?
-                        weights[i][j][k] -= delta_weights[i][j][k]; // order of brackets?
+                            B * delta_output_layer[k] * hidden_layers[i - 1][j];
+                        weights[i][j][k] -= delta_weights[i][j][k];
                     }
                 }
             }
@@ -247,8 +381,8 @@ private:
                     for (int k = 0; k < h_layer_sz; k++) {
                         delta_weights[i][j][k] = 
                             A * delta_weights[i][j][k] + 
-                            B * delta_hidden_layers[i - 1][k] * hidden_layers[i - 1][j]; // index problem?
-                        weights[i][j][k] -= delta_weights[i][j][k]; // order of brackets?
+                            B * delta_hidden_layers[i - 1][k] * hidden_layers[i - 1][j];
+                        weights[i][j][k] -= delta_weights[i][j][k];
                     }
                 }
             }
